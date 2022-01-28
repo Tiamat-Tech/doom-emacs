@@ -1,10 +1,13 @@
 ;;; core/autoload/projects.el -*- lexical-binding: t; -*-
 
-(defvar projectile-project-root)
-(defvar projectile-enable-caching)
-(defvar projectile-require-project-root)
-
-;;;###autoload (autoload 'projectile-relevant-known-projects "projectile")
+;; HACK We forward declare these variables because they are let-bound in a
+;;      number of places with no guarantee that they've been defined yet (i.e.
+;;      that `projectile' is loaded). If a variable is defined with `defvar'
+;;      while it is lexically bound, you get "Defining as dynamic an already
+;;      lexical var" errors in Emacs 28+).
+;;;###autoload (defvar projectile-project-root nil)
+;;;###autoload (defvar projectile-enable-caching doom-interactive-p)
+;;;###autoload (defvar projectile-require-project-root 'prompt)
 
 ;;;###autodef
 (cl-defun set-project-type! (name &key predicate compile run test configure dir)
@@ -38,7 +41,7 @@ they are absolute."
 
 ;;;###autoload
 (defun doom/find-file-in-other-project (project-root)
-  "Preforms `projectile-find-file' in a known project of your choosing."
+  "Performs `projectile-find-file' in a known project of your choosing."
   (interactive
    (list
     (completing-read "Find file in project: " (projectile-relevant-known-projects))))
@@ -48,7 +51,7 @@ they are absolute."
 
 ;;;###autoload
 (defun doom/browse-in-other-project (project-root)
-  "Preforms `find-file' in a known project of your choosing."
+  "Performs `find-file' in a known project of your choosing."
   (interactive
    (list
     (completing-read "Browse in project: " (projectile-relevant-known-projects))))
@@ -65,6 +68,24 @@ they are absolute."
 (defun doom/find-file-in-emacsd ()
   "Find a file under `doom-emacs-dir', recursively."
   (interactive) (doom-project-find-file doom-emacs-dir))
+
+;;;###autoload
+(defun doom/add-directory-as-project (dir)
+  "Register an arbitrary directory as a project.
+If DIR is not a valid project, a .project file will be created within it. This
+command will throw an error if a parent of DIR is a valid project (which would
+mask DIR)."
+  (interactive "D")
+  (let ((short-dir (abbreviate-file-name dir)))
+    (unless (file-equal-p (doom-project-root dir) dir)
+      (with-temp-file (doom-path dir ".project")))
+    (let ((proj-dir (doom-project-root dir)))
+      (unless (file-equal-p proj-dir dir)
+        (user-error "Can't add %S as a project, because %S is already a project"
+                    short-dir (abbreviate-file-name proj-dir)))
+      (message "%S was not a project; adding .project file to it"
+               short-dir (abbreviate-file-name proj-dir))
+      (projectile-add-known-project directory))))
 
 
 ;;
@@ -125,11 +146,16 @@ If DIR is not a project, it will be indexed (but not cached)."
             (if (doom-module-p :completion 'ivy)
                 #'counsel-projectile-find-file
               #'projectile-find-file)))
-          ((fboundp 'counsel-file-jump) ; ivy only
+          ((and (bound-and-true-p vertico-mode)
+                (fboundp '+vertico/find-file-in))
+           (+vertico/find-file-in default-directory))
+          ((and (bound-and-true-p ivy-mode)
+                (fboundp 'counsel-file-jump))
            (call-interactively #'counsel-file-jump))
           ((project-current nil dir)
            (project-find-file-in nil nil dir))
-          ((fboundp 'helm-find-files)
+          ((and (bound-and-true-p helm-mode)
+                (fboundp 'helm-find-files))
            (call-interactively #'helm-find-files))
           ((call-interactively #'find-file)))))
 
@@ -146,7 +172,7 @@ If DIR is not a project, it will be indexed (but not cached)."
 
 ;;;###autoload
 (defun doom-project-ignored-p (project-root)
-  "Return non-nil if remote or temporary file, or a straight package."
-  (and (not (file-remote-p project-root))
-       (or (file-in-directory-p project-root temporary-file-directory)
-           (file-in-directory-p project-root doom-local-dir))))
+  "Return non-nil if temporary file or a straight package."
+  (unless (file-remote-p project-root)
+    (or (file-in-directory-p project-root temporary-file-directory)
+        (file-in-directory-p project-root doom-local-dir))))

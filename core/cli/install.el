@@ -73,6 +73,9 @@ name. e.g.
     (print! "Regenerating autoloads files")
     (doom-autoloads-reload)
 
+    (print! "Deploying commit-msg and pre-push git hooks")
+    (doom-cli--ci-deploy-hooks)
+
     (cond (nofonts-p)
           (IS-WINDOWS
            (print! (warn "Doom cannot install all-the-icons' fonts on Windows!\n"))
@@ -95,5 +98,5 @@ name. e.g.
 
     (print! (success "\nFinished! Doom is ready to go!\n"))
     (with-temp-buffer
-      (insert-file-contents (doom-glob doom-core-dir "templates/QUICKSTART_INTRO"))
+      (insert-file-contents (doom-path doom-core-dir "templates/QUICKSTART_INTRO"))
       (print! "%s" (buffer-string)))))

@@ -60,33 +60,27 @@
          forms
        `(progn
           ;; doom variables
-          (setq doom--initial-load-path load-path
-                doom-debug-p t
+          (setq doom-debug-p t
                 doom-emacs-dir ,doom-emacs-dir
                 doom-cache-dir ,(expand-file-name "cache/" doom-sandbox-dir)
                 doom-etc-dir   ,(expand-file-name "etc/" doom-sandbox-dir))
-          (defun doom--write-to-etc-dir-a (orig-fn &rest args)
+          (defun doom--write-to-etc-dir-a (fn &rest args)
             (let ((user-emacs-directory doom-etc-dir))
-              (apply orig-fn args)))
+              (apply fn args)))
           (advice-add #'locate-user-emacs-file :around #'doom--write-to-etc-dir-a)
           ;; emacs essential variables
           (setq before-init-time (current-time)
                 after-init-time nil
                 init-file-debug doom-debug-p
                 noninteractive nil
-                process-environment ',doom--initial-process-environment
-                exec-path ',doom--initial-exec-path
+                process-environment (get 'process-environment 'initial-value)
+                exec-path (get 'exec-path 'initial-value)
                 load-path ',load-path
                 user-init-file load-file-name)
           ;; package.el
           (setq package--init-file-ensured t
                 package-user-dir ,package-user-dir
                 package-archives ',package-archives)
-          ;; comp.el
-          (setq comp-deferred-compilation nil
-                comp-eln-load-path ',(bound-and-true-p comp-eln-load-path)
-                comp-async-env-modifier-form ',(bound-and-true-p comp-async-env-modifier-form)
-                comp-deferred-compilation-black-list ',(bound-and-true-p comp-deferred-compilation-black-list))
           ;; (add-hook 'kill-emacs-hook
           ;;           (lambda ()
           ;;             (delete-file user-init-file)
@@ -117,7 +111,7 @@
                  (--run--)
                  (maphash (doom-module-loader doom-module-init-file) doom-modules)
                  (maphash (doom-module-loader doom-module-config-file) doom-modules)
-                 (run-hook-wrapped 'doom-init-modules-hook #'doom-try-run-hook)))
+                 (doom-run-hooks 'doom-init-modules-hook)))
              (`vanilla-doom  ; only Doom core
               `(progn
                  (load-file ,(expand-file-name "core.el" doom-core-dir))
@@ -127,11 +121,22 @@
                  (--run--)))
              (`vanilla       ; nothing loaded
               `(progn
-                 (package-initialize)
+                 (if (boundp 'comp-deferred-compilation)
+                     ;; REVIEW Remove me after a month
+                     (setq comp-deferred-compilation nil
+                           comp-deferred-compilation-deny-list ',(bound-and-true-p native-comp-async-env-modifier-form)
+                           comp-async-env-modifier-form ',(bound-and-true-p native-comp-async-env-modifier-form)
+                           comp-eln-load-path ',(bound-and-true-p native-comp-eln-load-path))
+                   (setq native-comp-deferred-compilation nil
+                         native-comp-deferred-compilation-deny-list ',(bound-and-true-p native-comp-async-env-modifier-form)
+                         native-comp-async-env-modifier-form ',(bound-and-true-p native-comp-async-env-modifier-form)
+                         native-comp-eln-load-path ',(bound-and-true-p native-comp-eln-load-path)))
+                 (package-initialize t)
                  (--run--))))
           ;; Then rerun Emacs' startup hooks to simulate a fresh Emacs session,
           ;; because they've already fired.
-          (fset 'doom-try-run-hook #',(symbol-function #'doom-try-run-hook))
+          (fset 'doom-run-hook  #',(symbol-function #'doom-run-hook))
+          (fset 'doom-run-hooks #',(symbol-function #'doom-run-hooks))
           (fset 'doom-run-all-startup-hooks-h #',(symbol-function #'doom-run-all-startup-hooks-h))
           (doom-run-all-startup-hooks-h))))))
 

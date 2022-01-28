@@ -13,8 +13,25 @@ following shell commands:
     bin/doom clean
     bin/doom sync -u"
   :bare t
-  (let ((doom-auto-discard force-p))
+  (let ((doom-auto-discard force-p)
+        (default-directory doom-emacs-dir))
     (cond
+     ((equal (replace-regexp-in-string
+              "^\\(?:[^/]+/[^/]+/\\)?\\(.+\\)\\(?:~[0-9]+\\)?$" "\\1"
+              (cdr (doom-call-process "git" "name-rev" "--name-only" "HEAD")))
+             "develop")
+      (print! (warn "Doom's primary branch has changed to 'master'. The develop branch will no\nlonger recieve updates and will eventually be deleted.\n"))
+      (if (not (or force-p (y-or-n-p "Switch to the master branch?")))
+          (error! "Aborting...")
+        (print! (info "Switching to master branch"))
+        (let ((remote
+               (cdr (doom-call-process "git" "config" "--get" "branch.develop.remote"))))
+          (doom-call-process "git" "config" (format "remote.%s.fetch" remote) (format "+refs/heads/*:refs/remotes/%s/*" remote))
+          (doom-call-process "git" "fetch" "--append" remote "master")
+          (doom-call-process "git" "checkout" "--track" (format "%s/master" remote))
+          (print! (info "Reloading Doom Emacs"))
+          (throw 'exit (list "doom" "upgrade" (if force-p "-f"))))))
+
      (packages-only-p
       (doom-cli-execute "sync" "-u")
       (print! (success "Finished upgrading Doom Emacs")))
@@ -43,6 +60,16 @@ following shell commands:
     (if (= 0 success)
         (split-string stdout "\n" t)
       (error "Failed to check working tree in %s" dir))))
+
+(defun doom--get-straight-recipe ()
+  (with-temp-buffer
+    (insert-file-contents (doom-path doom-core-dir "packages.el"))
+    (when (re-search-forward "(package! straight" nil t)
+      (goto-char (match-beginning 0))
+      (let ((sexp (sexp-at-point)))
+        (plist-put sexp :recipe
+                   (eval (plist-get sexp :recipe)
+                         t))))))
 
 
 (defun doom-cli-upgrade (&optional auto-accept-p force-p)
@@ -116,9 +143,22 @@ following shell commands:
                   (print! (start "Upgrading Doom Emacs..."))
                   (print-group!
                    (doom-clean-byte-compiled-files)
-                   (or (and (zerop (car (doom-call-process "git" "reset" "--hard" target-remote)))
-                            (equal (cdr (doom-call-process "git" "rev-parse" "HEAD")) new-rev))
-                       (error "Failed to check out %s" (substring new-rev 0 10)))
+                   (let ((straight-recipe (doom--get-straight-recipe)))
+                     (or (and (zerop (car (doom-call-process "git" "reset" "--hard" target-remote)))
+                              (equal (cdr (doom-call-process "git" "rev-parse" "HEAD")) new-rev))
+                         (error "Failed to check out %s" (substring new-rev 0 10)))
+                     ;; HACK It's messy to use straight to upgrade straight, due
+                     ;;      to the potential for backwards incompatibility, so
+                     ;;      we staticly check if Doom's `package!' declaration
+                     ;;      for straight has changed. If it has, delete
+                     ;;      straight so 'doom upgrade's second stage will
+                     ;;      install the new version for us.
+                     ;;
+                     ;;      Clumsy, but a better solution is in the works.
+                     (unless (equal straight-recipe (doom--get-straight-recipe))
+                       (print! (info "Preparing straight for an update"))
+                       (delete-directory (doom-path straight-base-dir "straight/repos/straight.el")
+                                         'recursive)))
                    (print! (info "%s") (cdr result))
                    t))))))
         (ignore-errors

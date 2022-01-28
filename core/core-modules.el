@@ -102,7 +102,8 @@ symbols, and that module's plist."
   (declare (pure t) (side-effect-free t))
   (lambda (module plist)
     (let ((doom--current-module module)
-          (doom--current-flags (plist-get plist :flags)))
+          (doom--current-flags (plist-get plist :flags))
+          (inhibit-redisplay t))
       (load! file (plist-get plist :path) t))))
 
 (defun doom-initialize-modules (&optional force-p no-config-p)
@@ -117,12 +118,13 @@ non-nil."
     (when-let (init-p (load! doom-module-init-file doom-private-dir t))
       (doom-log "Initializing user config")
       (maphash (doom-module-loader doom-module-init-file) doom-modules)
-      (run-hook-wrapped 'doom-before-init-modules-hook #'doom-try-run-hook)
+      (doom-run-hooks 'doom-before-init-modules-hook)
       (unless no-config-p
         (maphash (doom-module-loader doom-module-config-file) doom-modules)
-        (run-hook-wrapped 'doom-init-modules-hook #'doom-try-run-hook)
+        (doom-run-hooks 'doom-init-modules-hook)
         (load! "config" doom-private-dir t)
-        (load custom-file 'noerror (not doom-debug-mode))))))
+        (when custom-file
+          (load custom-file 'noerror (not doom-debug-mode)))))))
 
 
 ;;
@@ -171,7 +173,7 @@ following properties:
   :path  [STRING]       path to category root directory
 
 Example:
-  (doom-module-set :lang 'haskell :flags '(+dante))"
+  (doom-module-set :lang 'haskell :flags '(+lsp))"
   (puthash (cons category module) plist doom-modules))
 
 (defun doom-module-path (category module &optional file)
@@ -315,8 +317,7 @@ those directories. The first returned path is always `doom-private-dir'."
   "Minimally initialize `doom-modules' (a hash table) and return it.
 This value is cached. If REFRESH-P, then don't use the cached value."
   (if all-p
-      (cl-loop for path in (cdr (doom-module-load-path 'all))
-               collect (doom-module-from-path path))
+      (mapcar #'doom-module-from-path (cdr (doom-module-load-path 'all)))
     doom-modules))
 
 
@@ -367,13 +368,13 @@ This value is cached. If REFRESH-P, then don't use the cached value."
   ;; HACK Fix `:load-path' so it resolves relative paths to the containing file,
   ;;      rather than `user-emacs-directory'. This is a done as a convenience
   ;;      for users, wanting to specify a local directory.
-  (defadvice! doom--resolve-load-path-from-containg-file-a (orig-fn label arg &optional recursed)
+  (defadvice! doom--resolve-load-path-from-containg-file-a (fn label arg &optional recursed)
     "Resolve :load-path from the current directory."
     :around #'use-package-normalize-paths
     ;; `use-package-normalize-paths' resolves paths relative to
     ;; `user-emacs-directory', so we change that.
     (let ((user-emacs-directory (if (stringp arg) (dir!))))
-      (funcall orig-fn label arg recursed)))
+      (funcall fn label arg recursed)))
 
   ;; Adds two keywords to `use-package' to expand its lazy-loading capabilities:
   ;;

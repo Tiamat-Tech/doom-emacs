@@ -130,6 +130,55 @@ or file path may exist now."
              (eq buffer (window-buffer (selected-window))) ; only visible buffers
              (set-auto-mode))))))
 
+(defadvice! doom--shut-up-autosave-a (fn &rest args)
+  "If a file has autosaved data, `after-find-file' will pause for 1 second to
+tell you about it. Very annoying. This prevents that."
+  :around #'after-find-file
+  (letf! ((#'sit-for #'ignore))
+    (apply fn args)))
+
+;; HACK Emacs generates long file paths for its auto-save files; long =
+;;      `auto-save-list-file-prefix' + `buffer-file-name'. If too long, the
+;;      filesystem will murder your family. To appease it, I compress
+;;      `buffer-file-name' to a stable 40 characters.
+;; TODO PR this upstream; should be a universal issue!
+(defadvice! doom-make-hashed-auto-save-file-name-a (fn)
+  "Compress the auto-save file name so paths don't get too long."
+  :around #'make-auto-save-file-name
+  (let ((buffer-file-name
+         (if (or
+              ;; Don't do anything for non-file-visiting buffers. Names
+              ;; generated for those are short enough already.
+              (null buffer-file-name)
+              ;; If an alternate handler exists for this path, bow out.  Most of
+              ;; them end up calling `make-auto-save-file-name' again anyway, so
+              ;; we still achieve this advice's ultimate goal.
+              (find-file-name-handler buffer-file-name
+                                      'make-auto-save-file-name))
+             buffer-file-name
+           (sha1 buffer-file-name))))
+    (funcall fn)))
+
+;; HACK ...does the same for Emacs backup files, but also packages that use
+;;      `make-backup-file-name-1' directly (like undo-tree).
+(defadvice! doom-make-hashed-backup-file-name-a (fn file)
+  "A few places use the backup file name so paths don't get too long."
+  :around #'make-backup-file-name-1
+  (let ((alist backup-directory-alist)
+        backup-directory)
+    (while alist
+      (let ((elt (car alist)))
+        (if (string-match (car elt) file)
+            (setq backup-directory (cdr elt)
+                  alist nil)
+          (setq alist (cdr alist)))))
+    (let ((file (funcall fn file)))
+      (if (or (null backup-directory)
+              (not (file-name-absolute-p backup-directory)))
+          file
+        (expand-file-name (sha1 (file-name-nondirectory file))
+                          (file-name-directory file))))))
+
 
 ;;
 ;;; Formatting
@@ -186,10 +235,6 @@ or file path may exist now."
 ;; Cull duplicates in the kill ring to reduce bloat and make the kill ring
 ;; easier to peruse (with `counsel-yank-pop' or `helm-show-kill-ring'.
 (setq kill-do-not-save-duplicates t)
-
-;; Allow UTF or composed text from the clipboard, even in the terminal or on
-;; non-X systems (like Windows or macOS), where only `STRING' is used.
-(setq x-select-request-type '(UTF8_STRING COMPOUND_TEXT TEXT STRING))
 
 
 ;;
@@ -250,26 +295,25 @@ or file path may exist now."
   :defer-incrementally easymenu tree-widget timer
   :hook (doom-first-file . recentf-mode)
   :commands recentf-open-files
+  :custom (recentf-save-file (concat doom-cache-dir "recentf"))
   :config
-  (defun doom--recent-file-truename (file)
-    (if (or (file-remote-p file nil t)
-            (not (file-remote-p file)))
-        (file-truename file)
+  (setq recentf-auto-cleanup nil     ; Don't. We'll auto-cleanup on shutdown
+        recentf-max-saved-items 200) ; default is 20
+
+  (defun doom--recentf-file-truename-fn (file)
+    (if (or (not (file-remote-p file))
+            (equal "sudo" (file-remote-p file 'method)))
+        (abbreviate-file-name (file-truename (tramp-file-name-localname tfile)))
       file))
-  (setq recentf-filename-handlers
-        '(;; Text properties inflate the size of recentf's files, and there is
-          ;; no purpose in persisting them, so we strip them out.
-          substring-no-properties
-          ;; Resolve symlinks of local files. Otherwise we get duplicate
-          ;; entries opening symlinks.
-          doom--recent-file-truename
-          ;; Replace $HOME with ~, which is more portable, and reduces how much
-          ;; horizontal space the recentf listing uses to list recent files.
-          abbreviate-file-name)
-        recentf-save-file (concat doom-cache-dir "recentf")
-        recentf-auto-cleanup 'never
-        recentf-max-menu-items 0
-        recentf-max-saved-items 200)
+
+  ;; Resolve symlinks, strip out the /sudo:X@ prefix in local tramp paths, and
+  ;; abbreviate $HOME -> ~ in filepaths (more portable, more readable, & saves
+  ;; space)
+  (add-to-list 'recentf-filename-handlers #'doom--recentf-file-truename-fn)
+
+  ;; Text properties inflate the size of recentf's files, and there is
+  ;; no purpose in persisting them (Must be first in the list!)
+  (add-to-list 'recentf-filename-handlers #'substring-no-properties)
 
   (add-hook! '(doom-switch-window-hook write-file-functions)
     (defun doom--recentf-touch-buffer-h ()
@@ -281,10 +325,15 @@ or file path may exist now."
 
   (add-hook! 'dired-mode-hook
     (defun doom--recentf-add-dired-directory-h ()
-      "Add dired directory to recentf file list."
+      "Add dired directories to recentf file list."
       (recentf-add-file default-directory)))
 
+  ;; The most sensible time to clean up your recent files list is when you quit
+  ;; Emacs (unless this is a long-running daemon session).
+  (setq recentf-auto-cleanup (if (daemonp) 300))
   (add-hook 'kill-emacs-hook #'recentf-cleanup)
+
+  ;; Otherwise `load-file' calls in `recentf-load-list' pollute *Messages*
   (advice-add #'recentf-load-list :around #'doom-shut-up-a))
 
 
@@ -292,8 +341,7 @@ or file path may exist now."
   ;; persist variables across sessions
   :defer-incrementally custom
   :hook (doom-first-input . savehist-mode)
-  :init
-  (setq savehist-file (concat doom-cache-dir "savehist"))
+  :custom (savehist-file (concat doom-cache-dir "savehist"))
   :config
   (setq savehist-save-minibuffer-history t
         savehist-autosave-interval nil     ; save on kill only
@@ -304,7 +352,7 @@ or file path may exist now."
           search-ring regexp-search-ring)) ; persist searches
   (add-hook! 'savehist-save-hook
     (defun doom-savehist-unpropertize-variables-h ()
-      "Remove text properties from `kill-ring' for a smaller savehist file."
+      "Remove text properties from `kill-ring' to reduce savehist cache size."
       (setq kill-ring
             (mapcar #'substring-no-properties
                     (cl-remove-if-not #'stringp kill-ring))
@@ -327,39 +375,47 @@ the unwritable tidbits."
 (use-package! saveplace
   ;; persistent point location in buffers
   :hook (doom-first-file . save-place-mode)
-  :init
-  (setq save-place-file (concat doom-cache-dir "saveplace")
-        save-place-limit 100)
+  :custom (save-place-file (concat doom-cache-dir "saveplace"))
   :config
   (defadvice! doom--recenter-on-load-saveplace-a (&rest _)
     "Recenter on cursor when loading a saved place."
     :after-while #'save-place-find-file-hook
     (if buffer-file-name (ignore-errors (recenter))))
 
-  (defadvice! doom--inhibit-saveplace-in-long-files-a (orig-fn &rest args)
+  (defadvice! doom--inhibit-saveplace-in-long-files-a (fn &rest args)
     :around #'save-place-to-alist
     (unless doom-large-file-p
-      (apply orig-fn args)))
+      (apply fn args)))
 
-  (defadvice! doom--dont-prettify-saveplace-cache-a (orig-fn)
+  (defadvice! doom--dont-prettify-saveplace-cache-a (fn)
     "`save-place-alist-to-file' uses `pp' to prettify the contents of its cache.
 `pp' can be expensive for longer lists, and there's no reason to prettify cache
-files, so we replace calls to `pp' with the much faster `prin1'."
+files, so this replace calls to `pp' with the much faster `prin1'."
     :around #'save-place-alist-to-file
-    (letf! ((#'pp #'prin1)) (funcall orig-fn))))
+    (letf! ((#'pp #'prin1)) (funcall fn))))
 
 
 (use-package! server
   :when (display-graphic-p)
-  :after-call pre-command-hook after-find-file focus-out-hook
+  :after-call doom-first-input-hook doom-first-file-hook focus-out-hook
+  :custom (server-auth-dir (concat doom-emacs-dir "server/"))
   :defer 1
   :init
   (when-let (name (getenv "EMACS_SERVER_NAME"))
     (setq server-name name))
   :config
-  (setq server-auth-dir (concat doom-emacs-dir "server/"))
   (unless (server-running-p)
     (server-start)))
+
+
+(after! tramp
+  (setq remote-file-name-inhibit-cache 60
+        tramp-completion-reread-directory-timeout 60
+        tramp-verbose 1
+        vc-ignore-dir-regexp (format "%s\\|%s\\|%s"
+                                     vc-ignore-dir-regexp
+                                     tramp-file-name-regexp
+                                     "[/\\\\]node_modules")))
 
 
 ;;
@@ -376,21 +432,23 @@ files, so we replace calls to `pp' with the much faster `prin1'."
   (global-set-key [remap evil-jump-forward]  #'better-jumper-jump-forward)
   (global-set-key [remap evil-jump-backward] #'better-jumper-jump-backward)
   (global-set-key [remap xref-pop-marker-stack] #'better-jumper-jump-backward)
+  (global-set-key [remap xref-go-back] #'better-jumper-jump-backward)
+  (global-set-key [remap xref-go-forward] #'better-jumper-jump-forward)
   :config
-  (defun doom-set-jump-a (orig-fn &rest args)
-    "Set a jump point and ensure ORIG-FN doesn't set any new jump points."
+  (defun doom-set-jump-a (fn &rest args)
+    "Set a jump point and ensure fn doesn't set any new jump points."
     (better-jumper-set-jump (if (markerp (car args)) (car args)))
     (let ((evil--jumps-jumping t)
           (better-jumper--jumping t))
-      (apply orig-fn args)))
+      (apply fn args)))
 
-  (defun doom-set-jump-maybe-a (orig-fn &rest args)
-    "Set a jump point if ORIG-FN returns non-nil."
+  (defun doom-set-jump-maybe-a (fn &rest args)
+    "Set a jump point if fn returns non-nil."
     (let ((origin (point-marker))
           (result
            (let* ((evil--jumps-jumping t)
                   (better-jumper--jumping t))
-             (apply orig-fn args))))
+             (apply fn args))))
       (unless result
         (with-current-buffer (marker-buffer origin)
           (better-jumper-set-jump
@@ -407,6 +465,9 @@ files, so we replace calls to `pp' with the much faster `prin1'."
   ;; Creates a jump point before killing a buffer. This allows you to undo
   ;; killing a buffer easily (only works with file buffers though; it's not
   ;; possible to resurrect special buffers).
+  ;;
+  ;; I'm not advising `kill-buffer' because I only want this to affect
+  ;; interactively killed buffers.
   (advice-add #'kill-current-buffer :around #'doom-set-jump-a)
 
   ;; Create a jump point before jumping with imenu.
@@ -440,7 +501,7 @@ files, so we replace calls to `pp' with the much faster `prin1'."
   (push '(t tab-width) dtrt-indent-hook-generic-mapping-list)
 
   (defvar dtrt-indent-run-after-smie)
-  (defadvice! doom--fix-broken-smie-modes-a (orig-fn arg)
+  (defadvice! doom--fix-broken-smie-modes-a (fn &optional arg)
     "Some smie modes throw errors when trying to guess their indentation, like
 `nim-mode'. This prevents them from leaving Emacs in a broken state."
     :around #'dtrt-indent-mode
@@ -453,11 +514,12 @@ files, so we replace calls to `pp' with the much faster `prin1'."
                          (message "[WARNING] Indent detection: %s"
                                   (error-message-string e))
                          (message ""))))) ; warn silently
-        (funcall orig-fn arg)))))
+        (funcall fn arg)))))
 
 (use-package! helpful
   ;; a better *help* buffer
   :commands helpful--read-symbol
+  :hook (helpful-mode . visual-line-mode)
   :init
   ;; Make `apropos' et co search more extensively. They're more useful this way.
   (setq apropos-do-all t)
@@ -468,11 +530,11 @@ files, so we replace calls to `pp' with the much faster `prin1'."
   (global-set-key [remap describe-key]      #'helpful-key)
   (global-set-key [remap describe-symbol]   #'helpful-symbol)
 
-  (defun doom-use-helpful-a (orig-fn &rest args)
-    "Force ORIG-FN to use helpful instead of the old describe-* commands."
+  (defun doom-use-helpful-a (fn &rest args)
+    "Force FN to use helpful instead of the old describe-* commands."
     (letf! ((#'describe-function #'helpful-function)
             (#'describe-variable #'helpful-variable))
-      (apply orig-fn args)))
+      (apply fn args)))
 
   (after! apropos
     ;; patch apropos buttons to call helpful instead of help
@@ -498,6 +560,8 @@ files, so we replace calls to `pp' with the much faster `prin1'."
   :hook (doom-first-buffer . smartparens-global-mode)
   :commands sp-pair sp-local-pair sp-with-modes sp-point-in-comment sp-point-in-string
   :config
+  (add-to-list 'doom-point-in-string-functions 'sp-point-in-string)
+  (add-to-list 'doom-point-in-comment-functions 'sp-point-in-comment)
   ;; smartparens recognizes `slime-mrepl-mode', but not `sly-mrepl-mode', so...
   (add-to-list 'sp-lisp-modes 'sly-mrepl-mode)
   ;; Load default smartparens rules for various languages
@@ -550,8 +614,8 @@ on."
 
   ;; You're likely writing lisp in the minibuffer, therefore, disable these
   ;; quote pairs, which lisps doesn't use for strings:
-  (sp-local-pair 'minibuffer-inactive-mode "'" nil :actions nil)
-  (sp-local-pair 'minibuffer-inactive-mode "`" nil :actions nil)
+  (sp-local-pair '(minibuffer-mode minibuffer-inactive-mode) "'" nil :actions nil)
+  (sp-local-pair '(minibuffer-mode minibuffer-inactive-mode) "`" nil :actions nil)
 
   ;; Smartparens breaks evil-mode's replace state
   (defvar doom-buffer-smartparens-mode nil)
@@ -586,7 +650,6 @@ on."
   ;; wide buffers.
   (appendq! so-long-minor-modes
             '(flycheck-mode
-              flyspell-mode
               spell-fu-mode
               eldoc-mode
               smartparens-mode

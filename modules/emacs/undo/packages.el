@@ -3,5 +3,5 @@
 
 (if (featurep! +tree)
     (package! undo-tree :pin "e326c6135e62f5fe8536528d3acd5e798f847407")
-  (package! undo-fu :pin "f4db4c9b9875134df6f5279281099361ae11c2e9")
-  (package! undo-fu-session :pin "a0389147365c10c974ad68b797b185affb935fe3"))
+  (package! undo-fu :pin "ab8bc10e424bccc847800c31ab41888db789d55d")
+  (package! undo-fu-session :pin "1810251485a551bc41472ec9e7e7bfab72a45a3c"))

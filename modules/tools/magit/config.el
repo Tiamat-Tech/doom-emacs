@@ -4,13 +4,21 @@
   "What direction to open new windows from the status buffer.
 For example, diffs and log buffers. Accepts `left', `right', `up', and `down'.")
 
+(defvar +magit-fringe-size 14
+  "Size of the fringe in magit-mode buffers.
+
+Can be an integer or a cons cell whose CAR and CDR are integer widths for the
+left and right fringe.
+
+Only has an effect in GUI Emacs.")
+
 
 ;;
 ;;; Packages
 
 (use-package! magit
   :commands magit-file-delete
-  :defer-incrementally (dash f s with-editor git-commit package eieio lv transient)
+  :defer-incrementally (dash f s with-editor git-commit package eieio transient)
   :init
   (setq magit-auto-revert-mode nil)  ; we do this ourselves further down
   ;; Must be set early to prevent ~/.emacs.d/transient from being created
@@ -56,9 +64,9 @@ For example, diffs and log buffers. Accepts `left', `right', `up', and `down'.")
                          "~/.cache/")
                      "git/credential/socket")))
 
-  ;; Prevent scrolling when manipulating magit-status hunks. Otherwise you must
-  ;; reorient yourself every time you stage/unstage/discard/etc a hunk.
-  ;; Especially so on larger projects."
+  ;; Prevent sudden window position resets when staging/unstaging/discarding/etc
+  ;; hunks in `magit-status-mode' buffers. It's disorienting, especially on
+  ;; larger projects.
   (defvar +magit--pos nil)
   (add-hook! 'magit-pre-refresh-hook
     (defun +magit--set-window-state-h ()
@@ -100,10 +108,22 @@ For example, diffs and log buffers. Accepts `left', `right', `up', and `down'.")
 
   ;; Clean up after magit by killing leftover magit buffers and reverting
   ;; affected buffers (or at least marking them as need-to-be-reverted).
-  (define-key magit-status-mode-map [remap magit-mode-bury-buffer] #'+magit/quit)
+  (define-key magit-mode-map "q" #'+magit/quit)
+  (define-key magit-mode-map "Q" #'+magit/quit-all)
 
   ;; Close transient with ESC
   (define-key transient-map [escape] #'transient-quit-one)
+
+  (add-hook! 'magit-mode-hook
+    (add-hook! 'window-configuration-change-hook :local
+      (defun +magit-enlargen-fringe-h ()
+        "Make fringe larger in magit."
+        (and (display-graphic-p)
+             (derived-mode-p 'magit-mode)
+             +magit-fringe-size
+             (let ((left  (or (car-safe +magit-fringe-size) +magit-fringe-size))
+                   (right (or (cdr-safe +magit-fringe-size) +magit-fringe-size)))
+               (set-window-fringes nil left right))))))
 
   ;; An optimization that particularly affects macOS and Windows users: by
   ;; resolving `magit-git-executable' Emacs does less work to find the
@@ -132,6 +152,7 @@ For example, diffs and log buffers. Accepts `left', `right', `up', and `down'.")
   :commands forge-create-pullreq forge-create-issue
   :preface
   (setq forge-database-file (concat doom-etc-dir "forge/forge-database.sqlite"))
+  (setq forge-add-default-bindings (not (featurep! :editor evil +everywhere)))
   :config
   ;; All forge list modes are derived from `forge-topic-list-mode'
   (map! :map forge-topic-list-mode-map :n "q" #'kill-current-buffer)
@@ -167,14 +188,26 @@ ensure it is built when we actually use Forge."
             (add-hook hook #'forge-bug-reference-setup)))))))
 
 
-(use-package! github-review
+(use-package! code-review
+  :when (featurep! +forge)
   :after magit
+  :init
+  ;; TODO This needs to either a) be cleaned up or better b) better map things
+  ;; to fit
+  (after! evil-collection-magit
+    (dolist (binding evil-collection-magit-mode-map-bindings)
+      (pcase-let* ((`(,states _ ,evil-binding ,fn) binding))
+        (dolist (state states)
+          (evil-collection-define-key state 'code-review-mode-map evil-binding fn))))
+    (evil-set-initial-state 'code-review-mode evil-default-state))
+  (setq code-review-db-database-file (concat doom-etc-dir "code-review/code-review-db-file.sqlite")
+        code-review-log-file (concat doom-etc-dir "code-review/code-review-error.log"))
   :config
   (transient-append-suffix 'magit-merge "i"
-    '("y" "Review pull request" +magit/start-github-review))
+    '("y" "Review pull request" +magit/start-code-review))
   (after! forge
     (transient-append-suffix 'forge-dispatch "c u"
-      '("c r" "Review pull request" +magit/start-github-review))))
+      '("c r" "Review pull request" +magit/start-code-review))))
 
 
 (use-package! magit-todos
@@ -202,6 +235,9 @@ ensure it is built when we actually use Forge."
   ;; especially when traversing modes in magit buffers.
   (evil-define-key* 'normal magit-status-mode-map [escape] nil)
 
+  (after! code-review
+    (undefine-key! code-review-mode-map "M-1" "M-2" "M-3" "M-4" "1" "2" "3" "4" "0"))
+
   ;; Some extra vim-isms I thought were missing from upstream
   (evil-define-key* '(normal visual) magit-mode-map
     "%"  #'magit-gitflow-popup
@@ -216,6 +252,8 @@ ensure it is built when we actually use Forge."
   ;; REVIEW There must be a better way to exclude particular evil-collection
   ;;        modules from the blacklist.
   (map! (:map magit-mode-map
+         :nv "q" #'+magit/quit
+         :nv "Q" #'+magit/quit-all
          :nv "]" #'magit-section-forward-sibling
          :nv "[" #'magit-section-backward-sibling
          :nv "gr" #'magit-refresh
